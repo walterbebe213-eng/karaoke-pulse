@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #0A0A0A;
+  --color-on-background: #FFFFFF;
+  --color-surface: #0A0A0A;
+  --color-surface-dim: #050505;
+  --color-surface-bright: #222222;
+  --color-surface-container-lowest: #000000;
+  --color-surface-container-low: #0F0F0F;
+  --color-surface-container: #161616;
+  --color-surface-container-high: #1E1E1E;
+  --color-surface-container-highest: #282828;
+  --color-on-surface: #FFFFFF;
+  --color-on-surface-variant: rgba(255, 255, 255, 0.4);
+  --color-inverse-surface: #FFFFFF;
+  --color-inverse-on-surface: #0A0A0A;
+  --color-outline: rgba(255, 255, 255, 0.2);
+  --color-outline-variant: rgba(255, 255, 255, 0.1);
+  --color-surface-tint: #F27D26;
+  --color-primary: #F27D26;
+  --color-on-primary: #000000;
+  --color-primary-container: #833900;
+  --color-on-primary-container: #FFD2B8;
+  --color-inverse-primary: #C95C0E;
+  --color-secondary: #FFFFFF;
+  --color-on-secondary: #000000;
+  --color-secondary-container: #ECECEC;
+  --color-on-secondary-container: #1C1C1C;
+  --color-tertiary: #B2B2B2;
+  --color-on-tertiary: #000000;
+  --color-tertiary-container: #333333;
+  --color-on-tertiary-container: #E0E0E0;
+  --color-error: #FF3B30;
+  --color-on-error: #FFFFFF;
+  --color-error-container: #4A0200;
+  --color-on-error-container: #FFD2D1;
+
+  --font-sora: var(--font-sora), sans-serif;
+  --font-jakarta: var(--font-jakarta), sans-serif;
+  --font-mono: var(--font-mono), monospace;
+}
+
+@utility glass-card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(10,10,10,0.9) 100%);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+@utility neon-glow-primary {
+  box-shadow: 0 0 25px rgba(242, 125, 38, 0.35);
+}
+
+@utility neon-glow-tertiary {
+  box-shadow: 0 0 20px rgba(255, 255, 255, 0.15);
+}
+
+@utility pulse-animation {
+  animation: bg-pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes bg-pulse-glow {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+html, body {
+  background: #0A0A0A;
+  color: #FFFFFF;
+  font-family: var(--font-jakarta), sans-serif;
+}
+
+/* Custom scrollbar matching design */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #F27D26;
+  border-radius: 10px;
+}
+
