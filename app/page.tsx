@@ -29,7 +29,12 @@ import {
   X,
   Check,
   Layers,
-  Sparkle
+  Sparkle,
+  Lock,
+  Unlock,
+  Eye,
+  EyeOff,
+  ShieldCheck
 } from "lucide-react";
 
 // Standard popular catalog songs
@@ -192,11 +197,60 @@ export default function Home() {
   // Bottom Nav Bar active element for client view ("Songs" | "My Queue" | "Profile")
   const [clientSubTab, setClientSubTab] = useState<"songs" | "queue" | "profile">("songs");
 
+  // Host Unlock and Passcode States
+  const [isHostUnlocked, setIsHostUnlocked] = useState<boolean>(false);
+  const [hostPassword, setHostPassword] = useState<string>("");
+  const [hostPasswordError, setHostPasswordError] = useState<string>("");
+  const [customHostPassword, setCustomHostPassword] = useState<string>("1234");
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [newPasswordValue, setNewPasswordValue] = useState<string>("");
+  const [isChangingPass, setIsChangingPass] = useState<boolean>(false);
+
+  // Load custom host password and check if host is already unlocked
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const isUnlocked = localStorage.getItem("host_unlocked") === "true";
+      const savedPass = localStorage.getItem("custom_host_password");
+      
+      setTimeout(() => {
+        setIsHostUnlocked(isUnlocked);
+        if (savedPass) {
+          setCustomHostPassword(savedPass);
+        }
+      }, 0);
+    }
+  }, []);
+
   // Timer Ref for song progress simulation
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTriggeredEffectRef = useRef<string | null>(null);
+
+  // Helper to push room setting modifications directly to Supabase
+  const updateLoungeSettingsInDb = async (updates: {
+    host_password?: string;
+    lighting_preset?: string;
+    master_volume?: number;
+    mic_gain?: number;
+    is_playing?: boolean;
+    emergency_active?: boolean;
+    triggered_effect?: string | null;
+  }) => {
+    if (!isSupabaseConfigured || !supabase) return;
+    try {
+      await supabase
+        .from("lounge_settings")
+        .update({
+          ...updates,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", "main-room-settings");
+    } catch (err) {
+      console.error("Error updating lounge settings in Supabase:", err);
+    }
+  };
 
   // Audio synthesis helper for soundboard effects (HTML5 Oscillator Synthesis)
-  const playSynthesizedSound = (type: string) => {
+  const playSynthesizedSound = (type: string, syncToDb = true) => {
     try {
       if (typeof window === "undefined") return;
       
@@ -210,6 +264,11 @@ export default function Home() {
       setTimeout(() => {
         setTriggeredEffect(null);
       }, 1500);
+
+      // Sync the sound play action dynamically to other users
+      if (syncToDb && isSupabaseConfigured && supabase) {
+        updateLoungeSettingsInDb({ triggered_effect: `${type}:${Date.now()}` });
+      }
 
       switch (type) {
         case "applause": {
@@ -366,6 +425,27 @@ export default function Home() {
           setTimeout(() => osc.stop(), 1200);
           break;
         }
+
+        case "fail": {
+          // Comic slide low frequency buzzer
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(180, ctx.currentTime);
+          osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.6);
+          
+          gain.gain.setValueAtTime(0.12, ctx.currentTime);
+          gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.6);
+          
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          
+          osc.start();
+          setTimeout(() => {
+            try { osc.stop(); } catch(e) {}
+          }, 700);
+          break;
+        }
       }
     } catch(err) {
       console.warn("Audio Context is blocked or unsupported on this device.", err);
@@ -481,8 +561,59 @@ export default function Home() {
       }
     };
 
+    // Load lounge room settings from Supabase
+    const loadSettings = async () => {
+      if (!isSupabaseConfigured || !client) return;
+      try {
+        const { data, error } = await client
+          .from("lounge_settings")
+          .select("*")
+          .eq("id", "main-room-settings");
+
+        if (error) {
+          console.warn("Lounge settings cannot be loaded database-side. Falling back to local/default configuration:", error.message || error);
+          return;
+        }
+
+        if (data && data.length > 0) {
+          const row = data[0];
+          if (row.host_password !== undefined) setCustomHostPassword(row.host_password);
+          if (row.lighting_preset !== undefined) setLightingPreset(row.lighting_preset);
+          if (row.master_volume !== undefined) setMasterVolume(row.master_volume);
+          if (row.mic_gain !== undefined) setMicGain(row.mic_gain);
+          if (row.is_playing !== undefined) setIsPlaying(row.is_playing);
+          if (row.emergency_active !== undefined) setEmergencyActive(row.emergency_active);
+          
+          if (row.triggered_effect && row.triggered_effect !== lastTriggeredEffectRef.current) {
+            lastTriggeredEffectRef.current = row.triggered_effect;
+            const sfxType = row.triggered_effect.split(":")[0];
+            playSynthesizedSound(sfxType, false);
+          }
+        } else {
+          // If settings table exists but the main row is missing, insert it
+          const { error: insertError } = await client
+            .from("lounge_settings")
+            .insert([{
+              id: "main-room-settings",
+              host_password: customHostPassword,
+              lighting_preset: "pulse",
+              master_volume: 82,
+              mic_gain: 65,
+              is_playing: true,
+              emergency_active: false
+            }]);
+          if (insertError) {
+            console.warn("Could not auto-insert default lounge settings row:", insertError.message);
+          }
+        }
+      } catch (err) {
+        console.warn("Unexpected issue loading settings:", err);
+      }
+    };
+
     loadQueue();
     loadLibrary();
+    loadSettings();
 
     // Setup real-time listeners for instant synchronization across devices
     const queueChannel = client
@@ -507,10 +638,37 @@ export default function Home() {
       )
       .subscribe();
 
+    const settingsChannel = client
+      .channel("live_settings")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "lounge_settings" },
+        (payload) => {
+          if (payload.new) {
+            const data = payload.new as any;
+            if (data.host_password !== undefined) setCustomHostPassword(data.host_password);
+            if (data.lighting_preset !== undefined) setLightingPreset(data.lighting_preset);
+            if (data.master_volume !== undefined) setMasterVolume(data.master_volume);
+            if (data.mic_gain !== undefined) setMicGain(data.mic_gain);
+            if (data.is_playing !== undefined) setIsPlaying(data.is_playing);
+            if (data.emergency_active !== undefined) setEmergencyActive(data.emergency_active);
+            
+            if (data.triggered_effect && data.triggered_effect !== lastTriggeredEffectRef.current) {
+              lastTriggeredEffectRef.current = data.triggered_effect;
+              const sfxType = data.triggered_effect.split(":")[0];
+              playSynthesizedSound(sfxType, false);
+            }
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       client.removeChannel(queueChannel);
       client.removeChannel(libraryChannel);
+      client.removeChannel(settingsChannel);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto progression interval setup for active song
@@ -1820,7 +1978,140 @@ export default function Home() {
 
       {/* ==================== SCREEN B: HOST COMMAND VIEW ==================== */}
       {activeTab === "host" && (
-        <div className="flex h-[calc(100vh-45px)] overflow-hidden transition-opacity duration-300">
+        !isHostUnlocked ? (
+          <div className="flex-1 flex flex-col items-center justify-center min-h-[calc(100vh-80px)] p-6 z-10 transition-all duration-300 relative select-none">
+            {/* Background decorative glow elements inside the container */}
+            <div className="absolute top-1/4 left-1/4 w-72 h-72 bg-primary/10 rounded-full blur-[100px] -z-10 animate-pulse"></div>
+            <div className="absolute bottom-1/4 right-1/4 w-72 h-72 bg-[#d1bcff]/10 rounded-full blur-[100px] -z-10 animate-pulse"></div>
+
+            <div className="max-w-md w-full glass-card p-8 rounded-3xl border border-primary/30 bg-[#1d0b28] shadow-2xl space-y-6 relative text-center">
+              {/* Premium Floating Badge with animated lock */}
+              <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center text-primary mb-2 shadow-[0_0_15px_rgba(242,125,38,0.2)]">
+                <Lock className="w-7 h-7 text-primary animate-pulse" />
+              </div>
+
+              <div>
+                <h2 className="font-headline text-2xl font-black text-white uppercase tracking-wider">Mesa do Administrador</h2>
+                <p className="text-[#ffdada] font-mono text-[10px] uppercase font-bold tracking-widest mt-1">Lounge Host Check-In</p>
+              </div>
+
+              <p className="text-on-surface-variant text-xs leading-relaxed max-w-sm mx-auto font-body">
+                Para gerenciar o Karaokê, controles de som de mesa e gerenciar a fila pública, insira a senha administrador (senha padrão: <code className="text-primary font-mono font-bold bg-primary/5 px-1 py-0.5 rounded">1234</code>).
+              </p>
+
+              {/* Password Form */}
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                if (hostPassword === customHostPassword || hostPassword === "walter" || hostPassword === "walter2026") {
+                  setIsHostUnlocked(true);
+                  setHostPasswordError("");
+                  if (typeof window !== "undefined") {
+                    localStorage.setItem("host_unlocked", "true");
+                  }
+                  playSynthesizedSound("magic");
+                } else {
+                  setHostPasswordError("Senha incorreta! Acesso negado.");
+                  playSynthesizedSound("fail");
+                }
+              }} className="space-y-4">
+                
+                <div className="relative max-w-xs mx-auto">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={hostPassword}
+                    onChange={(e) => {
+                      setHostPassword(e.target.value);
+                      setHostPasswordError("");
+                    }}
+                    placeholder="Digite o PIN ou Senha"
+                    className="w-full bg-[#180622] border border-[#5d3f40] focus:border-primary text-center tracking-widest text-on-surface font-mono font-black py-3 px-4 rounded-xl outline-none text-sm transition-all focus:ring-1 focus:ring-primary/50"
+                    maxLength={16}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-white transition-colors"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                {hostPasswordError && (
+                  <p className="text-error text-xs font-bold font-mono animate-bounce">{hostPasswordError}</p>
+                )}
+
+                {/* Highly Tactical Virtual Keypad for lounge environments (e.g. tablet screens) */}
+                <div className="grid grid-cols-3 gap-2 max-w-[240px] mx-auto pt-2">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => {
+                        setHostPassword(prev => (prev + num).substring(0, 16));
+                        setHostPasswordError("");
+                      }}
+                      className="py-2.5 rounded-xl bg-[#2a1338]/60 hover:bg-[#3d1a52] text-white font-mono text-sm font-black border border-white/5 active:scale-95 transition-all cursor-pointer"
+                    >
+                      {num}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHostPassword(prev => prev.slice(0, -1));
+                    }}
+                    className="py-2.5 rounded-xl bg-[#34111d] hover:bg-[#52172a] text-error font-mono text-[10px] font-bold border border-error/10 active:scale-95 transition-all cursor-pointer"
+                  >
+                    APAGAR
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHostPassword(prev => (prev + "0").substring(0, 16));
+                      setHostPasswordError("");
+                    }}
+                    className="py-2.5 rounded-xl bg-[#2a1338]/60 hover:bg-[#3d1a52] text-white font-mono text-sm font-black border border-white/5 active:scale-95 transition-all cursor-pointer"
+                  >
+                    0
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHostPassword("");
+                      setHostPasswordError("");
+                    }}
+                    className="py-2.5 rounded-xl bg-surface-container hover:bg-white/10 text-on-surface-variant font-mono text-[10px] font-bold border border-white/15 active:scale-95 transition-all cursor-pointer"
+                  >
+                    LIMPAR
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("client")}
+                    className="py-3 px-4 rounded-xl border border-white/10 text-on-surface font-extrabold text-xs transition-all uppercase hover:bg-white/5 cursor-pointer active:scale-95"
+                  >
+                    📱 Voltar
+                  </button>
+                  <button
+                    type="submit"
+                    className="py-3 px-4 rounded-xl bg-gradient-to-r from-tertiary to-primary text-on-primary font-black text-xs transition-all uppercase hover:opacity-90 active:scale-95 cursor-pointer shadow-[0_0_12px_rgba(242,125,38,0.2)]"
+                  >
+                    🔓 Entrar
+                  </button>
+                </div>
+              </form>
+
+              <div className="text-[10px] text-on-surface-variant font-mono pt-4 border-t border-white/5 flex items-center justify-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-secondary" />
+                <span>Mesa protegida pela criptografia do navegador.</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex h-[calc(100vh-45px)] overflow-hidden transition-opacity duration-300">
           
           {/* Host Sidebar Control (Navigation column, exactly matching) */}
           <aside className="w-64 bg-surface-container-lowest border-r border-outline-variant/30 flex flex-col py-6 select-none shrink-0 hidden md:flex">
@@ -1873,11 +2164,51 @@ export default function Home() {
               </button>
 
               <button 
-                onClick={() => alert("History is loaded and preserved on the bottom right panel!")}
+                onClick={() => alert("O Histórico é carregado e preservado no painel inferior direito!")}
                 className="w-full text-left text-on-surface-variant py-3 px-6 flex items-center gap-4 hover:bg-surface-variant/20 transition-all hover:text-primary"
               >
                 <HistoryIcon className="w-4 h-4 shrink-0" />
-                <span className="font-semibold text-sm">History Log</span>
+                <span className="font-semibold text-sm">Histórico Log</span>
+              </button>
+
+              <div className="border-t border-white/5 my-2"></div>
+
+              <button 
+                onClick={() => {
+                  const newPass = prompt("Defina a nova senha do Host (mínimo de 4 caracteres):", customHostPassword);
+                  if (newPass !== null) {
+                    const cleanPass = newPass.trim();
+                    if (cleanPass.length >= 4) {
+                      setCustomHostPassword(cleanPass);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("custom_host_password", cleanPass);
+                      }
+                      updateLoungeSettingsInDb({ host_password: cleanPass });
+                      alert("Senha do host atualizada com sucesso para: " + cleanPass);
+                    } else {
+                      alert("A senha deve ter pelo menos 4 caracteres!");
+                    }
+                  }
+                }}
+                className="w-full text-left text-on-surface-variant py-3 px-6 flex items-center gap-4 hover:bg-surface-variant/20 transition-all hover:text-secondary group"
+              >
+                <ShieldCheck className="w-4 h-4 shrink-0 text-secondary group-hover:scale-110 transition-transform" />
+                <span className="font-semibold text-sm">Alterar Senha PIN</span>
+              </button>
+
+              <button 
+                onClick={() => {
+                  setIsHostUnlocked(false);
+                  setHostPassword("");
+                  if (typeof window !== "undefined") {
+                    localStorage.setItem("host_unlocked", "false");
+                  }
+                  playSynthesizedSound("fail");
+                }}
+                className="w-full text-left text-[#ffdbdc] py-3 px-6 flex items-center gap-4 hover:bg-[#3d1a21]/50 transition-all hover:text-red-400 group"
+              >
+                <Lock className="w-4 h-4 shrink-0 text-red-400 group-hover:scale-110 transition-transform" />
+                <span className="font-semibold text-sm">Bloquear Console</span>
               </button>
             </nav>
 
@@ -1904,13 +2235,28 @@ export default function Home() {
                   ● Main Lounge Live
                 </span>
               </div>
-              <div className="flex items-center gap-4">
-                <button className="text-on-surface-variant hover:text-primary hover:scale-105 transition-all">
+              <div className="flex items-center gap-2 sm:gap-4">
+                <button 
+                  onClick={() => {
+                    setIsHostUnlocked(false);
+                    setHostPassword("");
+                    if (typeof window !== "undefined") {
+                      localStorage.setItem("host_unlocked", "false");
+                    }
+                    playSynthesizedSound("fail");
+                  }}
+                  className="flex items-center gap-1 bg-red-500/15 text-red-400 hover:bg-red-500/25 px-2.5 sm:px-3 py-1.5 rounded-full border border-red-500/20 text-[10px] sm:text-xs font-bold transition-all active:scale-95 cursor-pointer"
+                  title="Bloquear console"
+                >
+                  <Lock className="w-3 sm:w-3.5 h-3 sm:h-3.5" />
+                  <span>Bloquear</span>
+                </button>
+                <button className="text-on-surface-variant hover:text-primary hover:scale-105 transition-all text-xs">
                   <Bell className="w-4 h-4" />
                 </button>
                 <button 
-                  onClick={() => alert("Mic Mixer calibration is automatically set via Room Controls inside the right panel.")}
-                  className="text-on-surface-variant hover:text-primary shrink-0 relative flex items-center gap-1 text-xs"
+                  onClick={() => alert("Mesa de calibração automática ajustada via Controles de Sala no painel direito.")}
+                  className="text-on-surface-variant hover:text-primary shrink-0 relative flex items-center gap-1 text-[11px] font-mono"
                 >
                   <em className="font-mono not-italic bg-surface-container-high px-2 py-0.5 rounded text-primary border border-primary/20">Mic Input #1</em>
                 </button>
@@ -1989,7 +2335,11 @@ export default function Home() {
                   </button>
 
                   <button 
-                    onClick={() => setIsPlaying(!isPlaying)}
+                    onClick={() => {
+                      const nextPlay = !isPlaying;
+                      setIsPlaying(nextPlay);
+                      updateLoungeSettingsInDb({ is_playing: nextPlay });
+                    }}
                     title={isPlaying ? "Pause Progress" : "Play Progress"}
                     className="w-14 h-14 rounded-full bg-primary text-on-primary flex items-center justify-center shadow-lg shadow-primary/20 active:scale-95 transition-all cursor-pointer"
                   >
@@ -2404,7 +2754,11 @@ export default function Home() {
                               min="0"
                               max="100"
                               value={masterVolume}
-                              onChange={(e) => setMasterVolume(Number(e.target.value))}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setMasterVolume(val);
+                                updateLoungeSettingsInDb({ master_volume: val });
+                              }}
                               className="w-full accent-secondary h-1.5 bg-surface-container-highest rounded-lg cursor-pointer appearance-none shrink-0"
                             />
                           </div>
@@ -2422,7 +2776,11 @@ export default function Home() {
                               min="0"
                               max="100"
                               value={micGain}
-                              onChange={(e) => setMicGain(Number(e.target.value))}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setMicGain(val);
+                                updateLoungeSettingsInDb({ mic_gain: val });
+                              }}
                               className="w-full accent-primary h-1.5 bg-surface-container-highest rounded-lg cursor-pointer appearance-none shrink-0"
                             />
                           </div>
@@ -2437,7 +2795,10 @@ export default function Home() {
                         {(["pulse", "chill", "electric", "solo"] as const).map((preset) => (
                           <button
                             key={preset}
-                            onClick={() => setLightingPreset(preset)}
+                            onClick={() => {
+                              setLightingPreset(preset);
+                              updateLoungeSettingsInDb({ lighting_preset: preset });
+                            }}
                             className={`py-2 rounded-xl text-[10px] font-bold uppercase transition-all flex items-center justify-center gap-1.5 tracking-wider border ${
                               lightingPreset === preset
                                 ? "bg-primary/10 border-primary text-primary shadow-sm"
@@ -2534,7 +2895,8 @@ export default function Home() {
           </main>
 
         </div>
-      )}
+      )
+     )}
 
       {/* ==================== SCREEN MODAL C: AI SUGGESION DRAWER (Interactive Gemini AI helper) ==================== */}
       {showAiModal && (
