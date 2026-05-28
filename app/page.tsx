@@ -844,7 +844,7 @@ export default function Home() {
 
     const newRequest: QueueItem = {
       id: `q-user-${Date.now()}`,
-      singer: `${userName} (Você)`,
+      singer: userName.trim(),
       songTitle: songName,
       artist: artistName,
       timeRequested: new Date().toLocaleTimeString("en-US", { hour: 'numeric', minute: '2-digit' }),
@@ -922,7 +922,7 @@ export default function Home() {
       if (q.id === userQueueItem.id) {
         return {
           ...q,
-          singer: `${userName} (Você)`,
+          singer: userName.trim(),
           songTitle: songName,
           artist: artistName
         };
@@ -1722,7 +1722,7 @@ export default function Home() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <h4 className="font-headline text-sm font-semibold text-primary truncate">
-                            {queue[0].singer === userName + " (Você)" ? "Você" : queue[0].singer}
+                            {queue[0].isUser ? "Você" : queue[0].singer}
                           </h4>
                           <p className="text-xs text-on-surface-variant truncate font-body">
                             {queue[0].songTitle} — {queue[0].artist}
